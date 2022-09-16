@@ -1,8 +1,11 @@
+import json
 import zipfile
 from operator import itemgetter
+from pathlib import Path
 from typing import Any, Optional, cast
 
 import pytest
+from cartes.osm import Overpass
 from requests import RequestException
 
 import pandas as pd
@@ -29,12 +32,10 @@ try:
 except zipfile.BadZipFile:
     skip_runways = True
 
-try:
-    import onnxruntime  # noqa: F401
-except ImportError:
-    onnxruntime_available = False
-else:
-    onnxruntime_available = True
+data_folder = Path(__file__).parent / "json"
+lszh_json = json.loads((data_folder / "overpass_lszh.json").read_text())
+lirf_json = json.loads((data_folder / "overpass_lirf.json").read_text())
+llbg_json = json.loads((data_folder / "overpass_llbg.json").read_text())
 
 
 def test_properties() -> None:
@@ -642,7 +643,12 @@ def test_agg_time_colnames() -> None:
 
 @pytest.mark.xfail(raises=RequestException, reason="Quotas on OpenStreetMap")
 def test_parking_position() -> None:
-    pp = elal747.on_parking_position("LIRF").next()
+    # These tests with calls to OpenStreetMap are a bit tricky and subject to
+    # uncontrolled edits on OpenStreetMap.
+    lszh_pp = Overpass(lszh_json).query('aeroway == "parking_position"')
+    lirf_pp = Overpass(lirf_json).query('aeroway == "parking_position"')
+
+    pp = elal747.on_parking_position("LIRF", parking_positions=lirf_pp).next()
     assert pp is not None
     assert pp.max("parking_position") == "702"
 
@@ -650,7 +656,7 @@ def test_parking_position() -> None:
     flight = zurich_airport["EDW229"]
     assert flight is not None
 
-    pp = flight.on_parking_position("LSZH").next()
+    pp = flight.on_parking_position("LSZH", parking_positions=lszh_pp).next()
     assert pp is not None
     assert 5 < pp.duration.total_seconds() < 10
     assert pp.parking_position_max == "A49"
@@ -689,10 +695,16 @@ def test_slow_taxi() -> None:
 @pytest.mark.xfail(raises=RequestException, reason="Quotas on OpenStreetMap")
 def test_pushback() -> None:
 
+    # These tests with calls to OpenStreetMap are a bit tricky and subject to
+    # uncontrolled edits on OpenStreetMap.
+    lszh_pp = Overpass(lszh_json).query('aeroway == "parking_position"')
+
     flight = zurich_airport["AEE5ZH"]
     assert flight is not None
-    parking_position = flight.on_parking_position("LSZH").max()
-    pushback = flight.pushback("LSZH")
+    parking_position = flight.on_parking_position(
+        "LSZH", parking_positions=lszh_pp
+    ).max()
+    pushback = flight.pushback("LSZH", parking_positions=lszh_pp)
 
     assert parking_position is not None
     assert pushback is not None
@@ -707,27 +719,33 @@ def test_pushback() -> None:
 
 @pytest.mark.xfail(raises=RequestException, reason="Quotas on OpenStreetMap")
 def test_on_taxiway() -> None:
+    # These tests with calls to OpenStreetMap are a bit tricky and subject to
+    # uncontrolled edits on OpenStreetMap.
+    lszh_taxiway = Overpass(lszh_json).query('aeroway == "taxiway"')
+    lirf_taxiway = Overpass(lirf_json).query('aeroway == "taxiway"')
+    llbg_taxiway = Overpass(llbg_json).query('aeroway == "taxiway"')
+
     flight = zurich_airport["ACA879"]
     assert flight is not None
-    assert len(flight.on_taxiway("LSZH")) == 3
+    assert len(flight.on_taxiway(lszh_taxiway)) == 3
 
     last_stop = pd.Timestamp(0, tz="utc")
     twy_names = ["C", "E", "E2"]
-    for i, twy_seg in enumerate(flight.on_taxiway("LSZH")):
+    for i, twy_seg in enumerate(flight.on_taxiway(lszh_taxiway)):
         assert twy_seg.start >= last_stop
         last_stop = twy_seg.stop
         assert twy_seg.taxiway_max == twy_names[i]
 
     flight = zurich_airport["SWISS"]
     assert flight is not None
-    assert flight.on_taxiway("LSZH").next() is None
+    assert flight.on_taxiway(lszh_taxiway).next() is None
 
     # another airport
     last_stop = pd.Timestamp(0, tz="utc")
     twy_names = ["V", "Z", "M", "R", "B", "BB"]
     flight = elal747
     assert flight is not None
-    for i, twy_seg in enumerate(flight.on_taxiway("LIRF")):
+    for i, twy_seg in enumerate(flight.on_taxiway(lirf_taxiway)):
         assert twy_seg.start >= last_stop
         last_stop = twy_seg.stop
         assert twy_seg.taxiway_max == twy_names[i]
@@ -735,7 +753,7 @@ def test_on_taxiway() -> None:
     # Landing
     last_stop = pd.Timestamp(0, tz="utc")
     twy_names = ["K", "M1", "D6"]
-    for i, twy_seg in enumerate(flight.on_taxiway("LLBG")):
+    for i, twy_seg in enumerate(flight.on_taxiway(llbg_taxiway)):
         assert twy_seg.start >= last_stop
         last_stop = twy_seg.stop
         assert twy_seg.taxiway_max == twy_names[i]
@@ -743,7 +761,7 @@ def test_on_taxiway() -> None:
     # Flight that leaves and come back to the airport
     flight = zurich_airport["SWR5220"]
     assert flight is not None
-    assert len(flight.on_taxiway("LSZH")) == 8
+    assert len(flight.on_taxiway(lszh_taxiway)) == 8
 
 
 def test_ground_trajectory() -> None:
@@ -806,7 +824,6 @@ def test_DME_NSE_computation() -> None:
     assert_frame_equal(result_df[["NSE", "NSE_idx"]], expected, rtol=1e-3)
 
 
-@pytest.mark.skipif(not onnxruntime_available, reason="onnxruntime not in pypi")
 def test_holding_pattern() -> None:
 
     holding_pattern = belevingsvlucht.holding_pattern().next()
